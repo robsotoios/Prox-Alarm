@@ -8,16 +8,49 @@
 
 import UIKit
 import CoreData
+import CoreLocation
+import UserNotifications
+import MobileCoreServices
 
 @UIApplicationMain
-class AppDelegate: UIResponder, UIApplicationDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate, CLLocationManagerDelegate, UNUserNotificationCenterDelegate {
 
     var window: UIWindow?
-
+    let locationManager = CLLocationManager()
+    
+    var playAlarm = false
+    var currentAlarm : NSManagedObject?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
+        
+        window = UIWindow(frame: UIScreen.main.bounds)
+        
+        let vc = HomeController()
+        let nav = UINavigationController(rootViewController: vc)
+        
+        nav.navigationBar.barTintColor = .black
+        nav.navigationBar.tintColor = .orange
+        nav.navigationBar.titleTextAttributes = [NSAttributedString.Key.foregroundColor : UIColor.white]
+        
+        window?.rootViewController = nav
+        window?.makeKeyAndVisible()
+        
+        startLocationManager()
+        
+        playAlarm = false
+        
+        setUpActiveAlarms()
+        
         return true
+    }
+    
+    func startLocationManager() {
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.startUpdatingLocation()
+        locationManager.startMonitoringSignificantLocationChanges()
     }
 
     func applicationWillResignActive(_ application: UIApplication) {
@@ -43,7 +76,106 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Saves changes in the application's managed object context before the application terminates.
         self.saveContext()
     }
+    
+    // MARK: - Location manager delegate methods
+    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        if status == .authorizedAlways {
+            setUpActiveAlarms()
+        }
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        userReachedDestination(region: region)
+    }
+    
+    // MARK: - Location functions
+    var activeAlarms = [NSManagedObject]()
+    
+    func setUpActiveAlarms() {
+        
+        print("set up active alarms called")
+        
+        activeAlarms.removeAll(keepingCapacity: false)
+        
+        let managedContext = self.persistentContainer.viewContext
+        let fetchRequest = NSFetchRequest<NSManagedObject>(entityName: "Alarm")
+        do {
+            let alarms = try managedContext.fetch(fetchRequest)
+            for alarm in alarms {
+                if let active = alarm.value(forKey: "active") as? Bool {
+                    if active {
+                        if let repeatArray = alarm.value(forKey: "repeatArray") as? [String] {
+                            let date = Date()
+                            let dateFormatter = DateFormatter()
+                            dateFormatter.dateFormat = "EEEE"
+                            let currentDateString: String = dateFormatter.string(from: date)
+                            if repeatArray.contains("Once") || repeatArray.contains("Always") || repeatArray.contains(currentDateString) {
+                                // Add the alarm to look for
+                                activeAlarms.append(alarm)
+                                passDistanceLatAndLong(alarm: alarm)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch let error as NSError {
+          print("Could not fetch. \(error), \(error.userInfo)")
+        }
+    }
+    
+    func passDistanceLatAndLong(alarm: NSManagedObject) {
+        if let distance = alarm.value(forKey: "distance") as? Double {
+            if let lat = alarm.value(forKey: "latitude") as? Double {
+                if let long = alarm.value(forKey: "longitude") as? Double {
+                    if let alarmName = alarm.value(forKey: "alarmName") as? String {
+                        let meters = convertFeetToMeters(feet: distance)
+                        setUpGeofenceForDestination(lat: lat, long: long, distance: meters, identifier: alarmName)
+                    }
+                }
+            }
+        }
+    }
+    
+    func setUpGeofenceForDestination(lat: Double, long: Double, distance: Double, identifier: String) {
+        print("set up geofence called")
+        let geofenceRegionCenter = CLLocationCoordinate2DMake(lat, long)
+        let geofenceRegion = CLCircularRegion(center: geofenceRegionCenter, radius: 100.0, identifier: identifier)
+       // geofenceRegion.notifyOnExit = true
+        geofenceRegion.notifyOnEntry = true
+        self.locationManager.startMonitoring(for: geofenceRegion)
+    }
+    
+    func convertFeetToMeters(feet: Double) -> Double {
+        let distanceFeet = Measurement(value: feet, unit: UnitLength.feet)
+        let distanceMeters = distanceFeet.converted(to: UnitLength.meters)
+        print("Ft: \(distanceFeet.value) - Mt: \(distanceMeters.value)")
+        return distanceMeters.value
+    }
 
+    let workspace = LSApplicationWorkspace()
+    
+    func userReachedDestination(region: CLRegion) {
+        let identifier = region.identifier
+        for alarm in activeAlarms {
+            
+            if let alarmName = alarm.value(forKey: "alarmName") as? String {
+                if alarmName == identifier {
+                    
+                    playAlarm = true
+                    currentAlarm = alarm
+                    // Reactivate the app
+                    openApp(withBundleIdentifier: "adapptt.Prox-Alarm")
+                    
+                }
+            }
+        }
+    }
+    
+    func openApp(withBundleIdentifier bundleIdentifier: String) {
+        // Call the Private API LSApplicationWorkspace method
+        workspace.openApplication(withBundleID: bundleIdentifier)
+    }
+    
     // MARK: - Core Data stack
 
     lazy var persistentContainer: NSPersistentContainer = {
@@ -53,7 +185,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
          application to it. This property is optional since there are legitimate
          error conditions that could cause the creation of the store to fail.
         */
-        let container = NSPersistentContainer(name: "Prox_Alarm")
+        let container = NSPersistentContainer(name: "CoreData")
         container.loadPersistentStores(completionHandler: { (storeDescription, error) in
             if let error = error as NSError? {
                 // Replace this implementation with code to handle the error appropriately.
@@ -74,7 +206,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }()
 
     // MARK: - Core Data Saving support
-
     func saveContext () {
         let context = persistentContainer.viewContext
         if context.hasChanges {
@@ -88,6 +219,5 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             }
         }
     }
-
 }
 
